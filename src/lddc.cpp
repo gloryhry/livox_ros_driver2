@@ -31,6 +31,7 @@
 #include <iomanip>
 #include <math.h>
 #include <stdint.h>
+#include <unistd.h>
 
 #include "include/ros_headers.h"
 
@@ -103,6 +104,7 @@ Lddc::~Lddc() {
     }
   }
 #endif
+  munmap(pointt, sizeof(time_stamp) * 1);
   std::cout << "lddc destory!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" << std::endl;
 }
 
@@ -165,6 +167,28 @@ void Lddc::PollingLidarPointCloudData(uint8_t index, LidarDevice *lidar) {
     return;
   }
 
+  //******************************************************************** add code
+  static bool is_opend = false;
+  if (is_opend == false) {
+    const char *user_name = getlogin();
+    std::string path_for_time_stamp = "/home/" + std::string(user_name) + "/timeshare";
+
+    const char *shared_file_name = path_for_time_stamp.c_str();
+    int fd = open(shared_file_name, O_CREAT | O_RDWR | O_TRUNC, 0666);
+    if (fd == -1) {
+      DRIVER_ERROR(*cur_node_, "open failed");
+      is_opend = false;
+    } else {
+      DRIVER_ERROR(*cur_node_, "open code: %d", fd);
+      is_opend = true;
+    }
+    lseek(fd, sizeof(time_stamp) * 1, SEEK_SET);
+    write(fd, "", 1);
+    pointt = (time_stamp *)mmap(NULL, sizeof(time_stamp) * 1,
+                                PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  }
+  //********************************************************************
+
   while (!lds_->IsRequestExit() && !QueueIsEmpty(p_queue)) {
     if (kPointCloud2Msg == transfer_format_) {
       PublishPointcloud2(p_queue, index);
@@ -211,6 +235,8 @@ void Lddc::PublishPointcloud2(LidarDataQueue *queue, uint8_t index) {
     uint64_t timestamp = 0;
     InitPointcloud2Msg(pkg, cloud, timestamp);
     PublishPointcloud2Data(index, timestamp, cloud);
+    pointt->low = timestamp;
+    // DRIVER_ERROR(*cur_node_, "pointt->low=%ld", pointt->low);
   }
 }
 
@@ -226,6 +252,13 @@ void Lddc::PublishCustomPointcloud(LidarDataQueue *queue, uint8_t index) {
     CustomMsg livox_msg;
     InitCustomMsg(livox_msg, pkg, index);
     FillPointsToCustomMsg(livox_msg, pkg);
+
+    uint64_t timestamp = 0;
+    if (!pkg.points.empty()) {
+      timestamp = pkg.base_time;
+    }
+    pointt->low = timestamp;
+
     PublishCustomPointData(livox_msg, index);
   }
 }
