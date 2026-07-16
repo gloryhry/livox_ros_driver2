@@ -104,9 +104,13 @@ class Lddc final {
 
  public:
   Lds *lds_;
-  time_stamp *pointt;
+  time_stamp *pointt = nullptr;
 
  private:
+  void InitTimestampShare();
+  void CloseTimestampShare();
+  void UpdateTimestampShare(uint64_t timestamp);
+
   void PollingLidarPointCloudData(uint8_t index, LidarDevice *lidar);
   void PollingLidarImuData(uint8_t index, LidarDevice *lidar);
 
@@ -149,6 +153,8 @@ class Lddc final {
   double publish_frq_;
   uint32_t publish_period_ns_;
   std::string frame_id_;
+  int timestamp_shm_fd_ = -1;
+  bool timestamp_shm_init_attempted_ = false;
 
 #ifdef BUILDING_ROS1
   bool enable_lidar_bag_;

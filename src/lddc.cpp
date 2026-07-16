@@ -26,6 +26,8 @@
 #include "comm/ldq.h"
 #include "comm/comm.h"
 
+#include <cerrno>
+#include <cstring>
 #include <inttypes.h>
 #include <iostream>
 #include <iomanip>
@@ -39,6 +41,10 @@
 #include "lds_lidar.h"
 
 namespace livox_ros {
+
+namespace {
+constexpr char kTimestampSharePath[] = "/tmp/livox_timeshare";
+}
 
 /** Lidar Data Distribute Control--------------------------------------------*/
 #ifdef BUILDING_ROS1
@@ -104,8 +110,61 @@ Lddc::~Lddc() {
     }
   }
 #endif
-  munmap(pointt, sizeof(time_stamp) * 1);
+  CloseTimestampShare();
   std::cout << "lddc destory!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" << std::endl;
+}
+
+void Lddc::InitTimestampShare() {
+  if (timestamp_shm_init_attempted_) {
+    return;
+  }
+  timestamp_shm_init_attempted_ = true;
+
+  int fd = open(kTimestampSharePath, O_CREAT | O_RDWR | O_CLOEXEC, 0666);
+  if (fd < 0) {
+    DRIVER_ERROR(*cur_node_, "Open timestamp share %s failed: %s",
+                 kTimestampSharePath, std::strerror(errno));
+    return;
+  }
+
+  if (ftruncate(fd, sizeof(time_stamp)) != 0) {
+    DRIVER_ERROR(*cur_node_, "Resize timestamp share %s failed: %s",
+                 kTimestampSharePath, std::strerror(errno));
+    close(fd);
+    return;
+  }
+
+  void *mapping = mmap(nullptr, sizeof(time_stamp), PROT_READ | PROT_WRITE,
+                       MAP_SHARED, fd, 0);
+  if (mapping == MAP_FAILED) {
+    DRIVER_ERROR(*cur_node_, "Map timestamp share %s failed: %s",
+                 kTimestampSharePath, std::strerror(errno));
+    close(fd);
+    return;
+  }
+
+  timestamp_shm_fd_ = fd;
+  pointt = static_cast<time_stamp *>(mapping);
+  pointt->high = 0;
+  pointt->low = 0;
+  DRIVER_INFO(*cur_node_, "Timestamp share %s is ready.", kTimestampSharePath);
+}
+
+void Lddc::CloseTimestampShare() {
+  if (pointt != nullptr) {
+    munmap(pointt, sizeof(time_stamp));
+    pointt = nullptr;
+  }
+  if (timestamp_shm_fd_ >= 0) {
+    close(timestamp_shm_fd_);
+    timestamp_shm_fd_ = -1;
+  }
+}
+
+void Lddc::UpdateTimestampShare(uint64_t timestamp) {
+  if (pointt != nullptr) {
+    pointt->low = static_cast<int64_t>(timestamp);
+  }
 }
 
 int Lddc::RegisterLds(Lds *lds) {
@@ -167,27 +226,7 @@ void Lddc::PollingLidarPointCloudData(uint8_t index, LidarDevice *lidar) {
     return;
   }
 
-  //******************************************************************** add code
-  static bool is_opend = false;
-  if (is_opend == false) {
-    const char *user_name = getlogin();
-    std::string path_for_time_stamp = "/home/" + std::string(user_name) + "/timeshare";
-
-    const char *shared_file_name = path_for_time_stamp.c_str();
-    int fd = open(shared_file_name, O_CREAT | O_RDWR | O_TRUNC, 0666);
-    if (fd == -1) {
-      DRIVER_ERROR(*cur_node_, "open failed");
-      is_opend = false;
-    } else {
-      DRIVER_ERROR(*cur_node_, "open code: %d", fd);
-      is_opend = true;
-    }
-    lseek(fd, sizeof(time_stamp) * 1, SEEK_SET);
-    write(fd, "", 1);
-    pointt = (time_stamp *)mmap(NULL, sizeof(time_stamp) * 1,
-                                PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-  }
-  //********************************************************************
+  InitTimestampShare();
 
   while (!lds_->IsRequestExit() && !QueueIsEmpty(p_queue)) {
     if (kPointCloud2Msg == transfer_format_) {
@@ -235,7 +274,7 @@ void Lddc::PublishPointcloud2(LidarDataQueue *queue, uint8_t index) {
     uint64_t timestamp = 0;
     InitPointcloud2Msg(pkg, cloud, timestamp);
     PublishPointcloud2Data(index, timestamp, cloud);
-    pointt->low = timestamp;
+    UpdateTimestampShare(timestamp);
     // DRIVER_ERROR(*cur_node_, "pointt->low=%ld", pointt->low);
   }
 }
@@ -257,7 +296,7 @@ void Lddc::PublishCustomPointcloud(LidarDataQueue *queue, uint8_t index) {
     if (!pkg.points.empty()) {
       timestamp = pkg.base_time;
     }
-    pointt->low = timestamp;
+    UpdateTimestampShare(timestamp);
 
     PublishCustomPointData(livox_msg, index);
   }
